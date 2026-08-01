@@ -2,6 +2,7 @@ package com.eni.bookhub.service;
 
 import com.eni.bookhub.dto.request.BookRequest;
 import com.eni.bookhub.dto.response.BookResponse;
+import com.eni.bookhub.dto.response.BookStatsResponse;
 import com.eni.bookhub.dto.response.BookSummaryResponse;
 import com.eni.bookhub.entity.Book;
 import com.eni.bookhub.entity.Category;
@@ -12,6 +13,8 @@ import com.eni.bookhub.repository.LoanRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -23,276 +26,272 @@ import org.springframework.data.jpa.domain.Specification;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.LocalDate;
+import java.time.Year;
 import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
+/**
+ * Tests du service de gestion du catalogue.
+ * <p>
+ * La recherche multicritère construit une {@link Specification} JPA. Le contenu exact
+ * de la spécification ne peut pas être vérifié ici sans base de données : ces tests
+ * s'assurent que la recherche est bien déléguée au dépôt et que la pagination est
+ * respectée, le comportement réel des filtres étant couvert par les tests d'intégration.
+ */
 @ExtendWith(MockitoExtension.class)
 class BookServiceTest {
 
-    @Mock private BookRepository bookRepository;
-    @Mock private BookMapper bookMapper;
-    @Mock private CategoryRepository categoryRepository;
-    @Mock private LoanRepository loanRepository;
+    private static final Pageable PAGE = PageRequest.of(0, 20);
 
-    @InjectMocks private BookService bookService;
+    @Mock
+    private BookRepository bookRepository;
+    @Mock
+    private BookMapper bookMapper;
+    @Mock
+    private CategoryRepository categoryRepository;
+    @Mock
+    private LoanRepository loanRepository;
 
-    private Category category;
+    @InjectMocks
+    private BookService bookService;
+
+    @Captor
+    private ArgumentCaptor<Book> bookCaptor;
+
+    private Category categorie;
     private Book book;
-    private BookResponse bookResponse;
-    private BookSummaryResponse summaryResponse;
 
     @BeforeEach
     void setUp() {
-        category = Category.builder().id(1).nom("Roman").build();
+        categorie = Category.builder().id(2).nom("Science-Fiction").build();
 
         book = Book.builder()
                 .id(1)
                 .titre("Dune")
                 .auteur("Frank Herbert")
-                .isbn("978-0-441-17271-9")
+                .isbn("978-2266320481")
                 .dateParution(LocalDate.of(1965, 8, 1))
-                .nombrePages(412)
-                .description("Un roman de science-fiction")
+                .nombrePages(880)
+                .description("Un classique de la science-fiction")
                 .totalExemplaires(5)
                 .exemplairesDisponibles(3)
-                .categorie(category)
-                .build();
-
-        bookResponse = BookResponse.builder()
-                .id(1).titre("Dune").auteur("Frank Herbert")
-                .totalExemplaires(5).exemplairesDisponibles(3).categorie("Roman")
-                .build();
-
-        summaryResponse = BookSummaryResponse.builder()
-                .id(1).titre("Dune").auteur("Frank Herbert")
-                .totalExemplaires(5).exemplairesDisponibles(3).categorie("Roman")
+                .categorie(categorie)
                 .build();
     }
 
-    // --- getAllBooks ---
+    private BookRequest bookRequest() {
+        BookRequest request = new BookRequest();
+        request.setTitre("Le Hobbit");
+        request.setAuteur("J.R.R. Tolkien");
+        request.setIsbn("978-2266282727");
+        request.setDateParution(LocalDate.of(1937, 9, 21));
+        request.setNombrePages(320);
+        request.setDescription("Le voyage de Bilbon");
+        request.setUrlCouverture("http://couvertures/hobbit.jpg");
+        request.setTotalExemplaires(4);
+        request.setCategorieId(2);
+        return request;
+    }
+
+    // ── Consultation du catalogue ──────────────────────────────────────────────
 
     @Test
-    void getAllBooks_returnsMappedPage() {
-        Pageable pageable = PageRequest.of(0, 10);
-        Page<Book> bookPage = new PageImpl<>(List.of(book));
-        when(bookRepository.findAll(pageable)).thenReturn(bookPage);
-        when(bookMapper.toSummaryResponse(book)).thenReturn(summaryResponse);
+    void getAllBooks_returnsPageOfSummaries() {
+        when(bookRepository.findAll(PAGE)).thenReturn(new PageImpl<>(List.of(book)));
+        when(bookMapper.toSummaryResponse(book))
+                .thenReturn(BookSummaryResponse.builder().id(1).titre("Dune").build());
 
-        Page<BookSummaryResponse> result = bookService.getAllBooks(pageable);
+        Page<BookSummaryResponse> page = bookService.getAllBooks(PAGE);
 
-        assertThat(result.getContent()).hasSize(1);
-        assertThat(result.getContent().get(0).getTitre()).isEqualTo("Dune");
+        assertThat(page.getContent()).hasSize(1);
+        assertThat(page.getContent().get(0).getTitre()).isEqualTo("Dune");
     }
 
     @Test
-    void getAllBooks_emptyRepository_returnsEmptyPage() {
-        Pageable pageable = PageRequest.of(0, 10);
-        when(bookRepository.findAll(pageable)).thenReturn(Page.empty());
+    void getById_existingBook_returnsDetailedResponse() {
+        when(bookRepository.findById(1)).thenReturn(Optional.of(book));
+        when(bookMapper.toResponse(book)).thenReturn(BookResponse.builder().id(1).titre("Dune").build());
 
-        Page<BookSummaryResponse> result = bookService.getAllBooks(pageable);
-
-        assertThat(result.getContent()).isEmpty();
-    }
-
-    // --- search ---
-
-    @Test
-    void search_withNullFilters_delegatesToRepository() {
-        Pageable pageable = PageRequest.of(0, 10);
-        Page<Book> page = new PageImpl<>(List.of(book));
-        when(bookRepository.findAll(any(Specification.class), eq(pageable))).thenReturn(page);
-        when(bookMapper.toSummaryResponse(book)).thenReturn(summaryResponse);
-
-        Page<BookSummaryResponse> result = bookService.search(null, null, null, null, null, pageable);
-
-        assertThat(result.getContent()).hasSize(1);
+        assertThat(bookService.getById(1).getTitre()).isEqualTo("Dune");
     }
 
     @Test
-    void search_withQuery_delegatesToRepository() {
-        Pageable pageable = PageRequest.of(0, 10);
-        when(bookRepository.findAll(any(Specification.class), eq(pageable)))
+    void getById_unknownBook_isRejected() {
+        when(bookRepository.findById(99)).thenReturn(Optional.empty());
+
+        RuntimeException exception = assertThrows(RuntimeException.class,
+                () -> bookService.getById(99));
+
+        assertThat(exception.getMessage()).isEqualTo("Livre introuvable");
+    }
+
+    // ── Recherche multicritère ─────────────────────────────────────────────────
+
+    @Test
+    void search_withoutCriteria_stillQueriesRepository() {
+        when(bookRepository.findAll(any(Specification.class), eq(PAGE)))
                 .thenReturn(new PageImpl<>(List.of(book)));
-        when(bookMapper.toSummaryResponse(book)).thenReturn(summaryResponse);
+        when(bookMapper.toSummaryResponse(book))
+                .thenReturn(BookSummaryResponse.builder().id(1).build());
 
-        Page<BookSummaryResponse> result = bookService.search("Dune", null, null, null, null, pageable);
+        Page<BookSummaryResponse> page = bookService.search(null, null, null, null, null, PAGE);
 
-        assertThat(result.getContent()).hasSize(1);
-        verify(bookRepository).findAll(any(Specification.class), eq(pageable));
-    }
-
-    // --- getYearRange ---
-
-    @Test
-    void getYearRange_bothPresent_returnsMinAndMax() {
-        when(bookRepository.findMinYear()).thenReturn(1990);
-        when(bookRepository.findMaxYear()).thenReturn(2024);
-
-        int[] range = bookService.getYearRange();
-
-        assertThat(range[0]).isEqualTo(1990);
-        assertThat(range[1]).isEqualTo(2024);
+        assertThat(page.getContent()).hasSize(1);
     }
 
     @Test
-    void getYearRange_minNull_returns1800AsDefault() {
-        when(bookRepository.findMinYear()).thenReturn(null);
+    void search_blankQuery_isTreatedAsNoCriteria() {
+        // Une chaîne vide envoyée par le formulaire ne doit pas filtrer le catalogue
+        when(bookRepository.findAll(any(Specification.class), eq(PAGE)))
+                .thenReturn(new PageImpl<>(List.of(book)));
+        when(bookMapper.toSummaryResponse(book))
+                .thenReturn(BookSummaryResponse.builder().id(1).build());
+
+        assertThat(bookService.search("   ", "  ", null, null, null, PAGE).getContent()).hasSize(1);
+    }
+
+    @Test
+    void search_allCriteriaProvided_returnsMatchingPage() {
+        when(bookRepository.findAll(any(Specification.class), eq(PAGE)))
+                .thenReturn(new PageImpl<>(List.of(book)));
+        when(bookMapper.toSummaryResponse(book))
+                .thenReturn(BookSummaryResponse.builder().id(1).titre("Dune").build());
+
+        Page<BookSummaryResponse> page =
+                bookService.search("dune", "Science-Fiction", true, 1900, 2000, PAGE);
+
+        assertThat(page.getContent()).hasSize(1);
+        verify(bookRepository).findAll(any(Specification.class), eq(PAGE));
+    }
+
+    @Test
+    void search_noResult_returnsEmptyPage() {
+        when(bookRepository.findAll(any(Specification.class), eq(PAGE)))
+                .thenReturn(new PageImpl<>(List.of()));
+
+        assertThat(bookService.search("titre inexistant", null, null, null, null, PAGE)).isEmpty();
+    }
+
+    // ── Bornes du filtre par année ─────────────────────────────────────────────
+
+    @Test
+    void getYearRange_returnsBoundsFromCatalog() {
+        when(bookRepository.findMinYear()).thenReturn(1950);
         when(bookRepository.findMaxYear()).thenReturn(2020);
 
-        int[] range = bookService.getYearRange();
-
-        assertThat(range[0]).isEqualTo(1800);
-        assertThat(range[1]).isEqualTo(2020);
+        assertThat(bookService.getYearRange()).containsExactly(1950, 2020);
     }
 
     @Test
-    void getYearRange_maxNull_returnsCurrentYearAsDefault() {
-        when(bookRepository.findMinYear()).thenReturn(2000);
+    void getYearRange_emptyCatalog_returnsDefaultBounds() {
+        // Sans aucun livre, le filtre du front doit tout de même disposer d'un intervalle
+        when(bookRepository.findMinYear()).thenReturn(null);
         when(bookRepository.findMaxYear()).thenReturn(null);
 
-        int[] range = bookService.getYearRange();
-
-        assertThat(range[0]).isEqualTo(2000);
-        assertThat(range[1]).isEqualTo(java.time.Year.now().getValue());
+        assertThat(bookService.getYearRange()).containsExactly(1800, Year.now().getValue());
     }
 
-    // --- getById ---
+    // ── Statistiques ───────────────────────────────────────────────────────────
 
     @Test
-    void getById_bookFound_returnsMappedResponse() {
+    void getStats_computesBorrowedCopiesFromTotalAndAvailable() {
+        when(bookRepository.count()).thenReturn(6L);
+        when(bookRepository.sumTotalExemplaires()).thenReturn(30L);
+        when(bookRepository.sumExemplairesDisponibles()).thenReturn(22L);
+
+        BookStatsResponse stats = bookService.getStats();
+
+        assertThat(stats.getTotalTitres()).isEqualTo(6);
+        assertThat(stats.getTotalExemplaires()).isEqualTo(30);
+        assertThat(stats.getDisponibles()).isEqualTo(22);
+        assertThat(stats.getEnPret()).isEqualTo(8);
+    }
+
+    // ── Création ───────────────────────────────────────────────────────────────
+
+    @Test
+    void createBook_newBook_isFullyAvailableOnCreation() {
+        // À l'entrée en stock, tous les exemplaires sont disponibles
+        when(categoryRepository.findById(2)).thenReturn(Optional.of(categorie));
+        when(bookRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        bookService.createBook(bookRequest());
+
+        verify(bookRepository).save(bookCaptor.capture());
+        Book saved = bookCaptor.getValue();
+        assertThat(saved.getTitre()).isEqualTo("Le Hobbit");
+        assertThat(saved.getCategorie()).isEqualTo(categorie);
+        assertThat(saved.getTotalExemplaires()).isEqualTo(4);
+        assertThat(saved.getExemplairesDisponibles()).isEqualTo(4);
+    }
+
+    @Test
+    void createBook_unknownCategory_isRejected() {
+        when(categoryRepository.findById(2)).thenReturn(Optional.empty());
+
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> bookService.createBook(bookRequest()));
+
+        assertThat(exception.getReason()).isEqualTo("Catégorie introuvable");
+        verify(bookRepository, never()).save(any());
+    }
+
+    // ── Modification ───────────────────────────────────────────────────────────
+
+    @Test
+    void updateBook_existingBook_appliesNewValues() {
         when(bookRepository.findById(1)).thenReturn(Optional.of(book));
-        when(bookMapper.toResponse(book)).thenReturn(bookResponse);
+        when(categoryRepository.findById(2)).thenReturn(Optional.of(categorie));
 
-        BookResponse result = bookService.getById(1);
+        bookService.updateBook(1, bookRequest());
 
-        assertThat(result.getTitre()).isEqualTo("Dune");
+        assertThat(book.getTitre()).isEqualTo("Le Hobbit");
+        assertThat(book.getAuteur()).isEqualTo("J.R.R. Tolkien");
+        assertThat(book.getTotalExemplaires()).isEqualTo(4);
     }
 
     @Test
-    void getById_bookNotFound_throwsException() {
+    void updateBook_doesNotResetAvailableCopies() {
+        // Trois exemplaires sur cinq étaient disponibles : modifier la fiche
+        // ne doit pas faire réapparaître les deux exemplaires empruntés.
+        when(bookRepository.findById(1)).thenReturn(Optional.of(book));
+        when(categoryRepository.findById(2)).thenReturn(Optional.of(categorie));
+
+        bookService.updateBook(1, bookRequest());
+
+        assertThat(book.getExemplairesDisponibles()).isEqualTo(3);
+    }
+
+    @Test
+    void updateBook_unknownBook_isRejected() {
         when(bookRepository.findById(99)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> bookService.getById(99))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("introuvable");
-    }
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> bookService.updateBook(99, bookRequest()));
 
-    // --- createBook ---
-
-    @Test
-    void createBook_categoryFound_savesAndReturnsBook() {
-        BookRequest request = new BookRequest();
-        request.setTitre("Dune");
-        request.setAuteur("Frank Herbert");
-        request.setIsbn("978-0-441-17271-9");
-        request.setDateParution(LocalDate.of(1965, 8, 1));
-        request.setNombrePages(412);
-        request.setDescription("SF");
-        request.setTotalExemplaires(5);
-        request.setCategorieId(1);
-
-        when(categoryRepository.findById(1)).thenReturn(Optional.of(category));
-        when(bookRepository.save(any())).thenReturn(book);
-        when(bookMapper.toResponse(book)).thenReturn(bookResponse);
-
-        BookResponse result = bookService.createBook(request);
-
-        assertThat(result.getTitre()).isEqualTo("Dune");
-        verify(bookRepository).save(any(Book.class));
+        assertThat(exception.getReason()).isEqualTo("Livre introuvable");
     }
 
     @Test
-    void createBook_exemplairesDisponiblesEqualsTotal() {
-        BookRequest request = new BookRequest();
-        request.setTitre("Test");
-        request.setAuteur("Auteur");
-        request.setIsbn("123");
-        request.setDateParution(LocalDate.now());
-        request.setNombrePages(100);
-        request.setDescription("desc");
-        request.setTotalExemplaires(3);
-        request.setCategorieId(1);
-
-        when(categoryRepository.findById(1)).thenReturn(Optional.of(category));
-        when(bookRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
-        when(bookMapper.toResponse(any())).thenReturn(bookResponse);
-
-        bookService.createBook(request);
-
-        verify(bookRepository).save(argThat(b -> b.getExemplairesDisponibles().equals(3)));
-    }
-
-    @Test
-    void createBook_categoryNotFound_throws404() {
-        BookRequest request = new BookRequest();
-        request.setCategorieId(99);
-
-        when(categoryRepository.findById(99)).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> bookService.createBook(request))
-                .isInstanceOf(ResponseStatusException.class)
-                .hasMessageContaining("404");
-    }
-
-    // --- updateBook ---
-
-    @Test
-    void updateBook_bookAndCategoryFound_updatesAndReturnsBook() {
-        BookRequest request = new BookRequest();
-        request.setTitre("Nouveau titre");
-        request.setAuteur("Nouvel auteur");
-        request.setIsbn("new-isbn");
-        request.setDateParution(LocalDate.of(2020, 1, 1));
-        request.setNombrePages(300);
-        request.setDescription("Nouvelle description");
-        request.setTotalExemplaires(10);
-        request.setCategorieId(1);
-
+    void updateBook_unknownCategory_isRejected() {
         when(bookRepository.findById(1)).thenReturn(Optional.of(book));
-        when(categoryRepository.findById(1)).thenReturn(Optional.of(category));
-        when(bookMapper.toResponse(book)).thenReturn(bookResponse);
+        when(categoryRepository.findById(2)).thenReturn(Optional.empty());
 
-        bookService.updateBook(1, request);
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> bookService.updateBook(1, bookRequest()));
 
-        assertThat(book.getTitre()).isEqualTo("Nouveau titre");
-        assertThat(book.getAuteur()).isEqualTo("Nouvel auteur");
-        assertThat(book.getNombrePages()).isEqualTo(300);
+        assertThat(exception.getReason()).isEqualTo("Catégorie introuvable");
     }
 
-    @Test
-    void updateBook_bookNotFound_throws404() {
-        BookRequest request = new BookRequest();
-        request.setCategorieId(1);
-
-        when(bookRepository.findById(99)).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> bookService.updateBook(99, request))
-                .isInstanceOf(ResponseStatusException.class)
-                .hasMessageContaining("404");
-    }
+    // ── Suppression ────────────────────────────────────────────────────────────
 
     @Test
-    void updateBook_categoryNotFound_throws404() {
-        BookRequest request = new BookRequest();
-        request.setCategorieId(99);
-
-        when(bookRepository.findById(1)).thenReturn(Optional.of(book));
-        when(categoryRepository.findById(99)).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> bookService.updateBook(1, request))
-                .isInstanceOf(ResponseStatusException.class)
-                .hasMessageContaining("404");
-    }
-
-    // --- deleteBook ---
-
-    @Test
-    void deleteBook_noActiveLoans_deletesBook() {
+    void deleteBook_noLoanInProgress_deletesBook() {
         when(bookRepository.findById(1)).thenReturn(Optional.of(book));
         when(loanRepository.existsByLivreIdAndStatutIn(1, List.of("EN COURS", "EN RETARD")))
                 .thenReturn(false);
@@ -303,22 +302,26 @@ class BookServiceTest {
     }
 
     @Test
-    void deleteBook_activeLoansExist_throwsException() {
+    void deleteBook_loanStillInProgress_isRejected() {
+        // Règle de gestion : on ne supprime pas un livre encore détenu par un adhérent
         when(bookRepository.findById(1)).thenReturn(Optional.of(book));
         when(loanRepository.existsByLivreIdAndStatutIn(1, List.of("EN COURS", "EN RETARD")))
                 .thenReturn(true);
 
-        assertThatThrownBy(() -> bookService.deleteBook(1))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("emprunts");
+        RuntimeException exception = assertThrows(RuntimeException.class,
+                () -> bookService.deleteBook(1));
+
+        assertThat(exception.getMessage()).contains("des emprunts sont en cours");
+        verify(bookRepository, never()).delete(any(Book.class));
     }
 
     @Test
-    void deleteBook_bookNotFound_throws404() {
+    void deleteBook_unknownBook_isRejected() {
         when(bookRepository.findById(99)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> bookService.deleteBook(99))
-                .isInstanceOf(ResponseStatusException.class)
-                .hasMessageContaining("404");
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> bookService.deleteBook(99));
+
+        assertThat(exception.getReason()).isEqualTo("Livre introuvable");
     }
 }

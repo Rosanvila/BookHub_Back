@@ -5,9 +5,12 @@ import com.eni.bookhub.entity.Book;
 import com.eni.bookhub.entity.Loan;
 import com.eni.bookhub.entity.User;
 import com.eni.bookhub.mapper.LoanMapper;
+import com.eni.bookhub.notification.MailService;
 import com.eni.bookhub.repository.BookRepository;
 import com.eni.bookhub.repository.LoanRepository;
 import com.eni.bookhub.repository.UserRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,19 +21,24 @@ import java.util.List;
 @Service
 public class LoanService {
 
+    private static final Logger log = LoggerFactory.getLogger(LoanService.class);
+
     private final LoanRepository loanRepository;
     private final BookRepository bookRepository;
     private final UserRepository userRepository;
     private final LoanMapper loanMapper;
+    private final MailService mailService;
 
     public LoanService(LoanRepository loanRepository,
             BookRepository bookRepository,
             UserRepository userRepository,
-            LoanMapper loanMapper) {
+            LoanMapper loanMapper,
+            MailService mailService) {
         this.loanRepository = loanRepository;
         this.bookRepository = bookRepository;
         this.userRepository = userRepository;
         this.loanMapper = loanMapper;
+        this.mailService = mailService;
     }
 
     @Transactional
@@ -69,6 +77,12 @@ public class LoanService {
         loan.setStatut("EN COURS");
 
         loanRepository.save(loan);
+
+        try {
+            mailService.sendLoanConfirmation(loan);
+        } catch (Exception e) {
+            log.warn("Échec de l'envoi de l'email de confirmation pour l'emprunt {}", loan.getId(), e);
+        }
 
         return loanMapper.toResponse(loan);
     }

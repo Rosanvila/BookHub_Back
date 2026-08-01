@@ -9,34 +9,53 @@ import com.eni.bookhub.repository.UserRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.LocalDateTime;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
+/**
+ * Tests de l'inscription et de la connexion.
+ * <p>
+ * Comme pour {@link UserServiceTest}, l'encodeur BCrypt est instancié par le service
+ * lui-même : les tests manipulent donc de vraies empreintes.
+ */
 @ExtendWith(MockitoExtension.class)
 class AuthServiceTest {
 
-    @Mock private UserRepository userRepository;
-    @Mock private JwtService jwtService;
-    @Mock private UserMapper userMapper;
+    private static final String EMAIL = "jean.dupont@email.com";
+    private static final String MOT_DE_PASSE = "MotDePasse@2026";
+    private static final String TELEPHONE = "0612345678";
 
-    @InjectMocks private AuthService authService;
+    private static final BCryptPasswordEncoder ENCODER = new BCryptPasswordEncoder(12);
 
-    // BCrypt strength 4 pour la vitesse ; matches() vérifie le coût depuis le hash stocké
-    private static final BCryptPasswordEncoder TEST_ENCODER = new BCryptPasswordEncoder(4);
-    private static final String RAW_PASSWORD = "Test@1234567890";
-    private static final String ENCODED_PASSWORD = TEST_ENCODER.encode(RAW_PASSWORD);
+    @Mock
+    private UserRepository userRepository;
+    @Mock
+    private JwtService jwtService;
+    @Mock
+    private UserMapper userMapper;
+
+    @InjectMocks
+    private AuthService authService;
+
+    @Captor
+    private ArgumentCaptor<String> passwordCaptor;
 
     private User user;
+    private RegisterRequest registerRequest;
 
     @BeforeEach
     void setUp() {
@@ -44,106 +63,142 @@ class AuthServiceTest {
                 .id(1)
                 .nom("Dupont")
                 .prenom("Jean")
-                .email("jean@test.com")
-                .telephone("0600000000")
-                .motDePasse(ENCODED_PASSWORD)
+                .email(EMAIL)
+                .telephone(TELEPHONE)
+                .motDePasse(ENCODER.encode(MOT_DE_PASSE))
                 .role(User.Role.UTILISATEUR)
-                .dateCreation(LocalDateTime.now())
+                .dateCreation(LocalDateTime.of(2026, 1, 15, 10, 0))
                 .build();
+
+        registerRequest = new RegisterRequest();
+        registerRequest.setNom("Dupont");
+        registerRequest.setPrenom("Jean");
+        registerRequest.setEmail(EMAIL);
+        registerRequest.setTelephone(TELEPHONE);
+        registerRequest.setMotDePasse(MOT_DE_PASSE);
     }
 
-    // --- register ---
+    private LoginRequest loginRequest(String email, String motDePasse) {
+        LoginRequest request = new LoginRequest();
+        request.setEmail(email);
+        request.setMotDePasse(motDePasse);
+        return request;
+    }
+
+    // ── Inscription ────────────────────────────────────────────────────────────
 
     @Test
-    void register_success_returnsTokenAndUserInfo() {
-        RegisterRequest request = new RegisterRequest();
-        request.setNom("Dupont");
-        request.setPrenom("Jean");
-        request.setEmail("jean@test.com");
-        request.setTelephone("0600000000");
-        request.setMotDePasse(RAW_PASSWORD);
+    void register_newUser_savesAccountAndReturnsToken() {
+        when(userRepository.existsByEmail(EMAIL)).thenReturn(false);
+        when(userRepository.existsByTelephone(TELEPHONE)).thenReturn(false);
+        when(userMapper.toEntity(eq(registerRequest), any())).thenReturn(user);
+        when(jwtService.generateToken(EMAIL, "UTILISATEUR")).thenReturn("jeton-jwt");
 
-        when(userRepository.existsByEmail("jean@test.com")).thenReturn(false);
-        when(userRepository.existsByTelephone("0600000000")).thenReturn(false);
-        when(userMapper.toEntity(any(), any())).thenReturn(user);
-        when(userRepository.save(any())).thenReturn(user);
-        when(jwtService.generateToken("jean@test.com", "UTILISATEUR")).thenReturn("token123");
+        AuthResponse response = authService.register(registerRequest);
 
-        AuthResponse response = authService.register(request);
-
-        assertThat(response.getToken()).isEqualTo("token123");
-        assertThat(response.getEmail()).isEqualTo("jean@test.com");
+        verify(userRepository).save(user);
+        assertThat(response.getToken()).isEqualTo("jeton-jwt");
+        assertThat(response.getEmail()).isEqualTo(EMAIL);
         assertThat(response.getRole()).isEqualTo("UTILISATEUR");
     }
 
     @Test
-    void register_emailAlreadyUsed_throwsException() {
-        RegisterRequest request = new RegisterRequest();
-        request.setEmail("jean@test.com");
-        request.setTelephone("0600000000");
+    void register_hashesPasswordBeforePersisting() {
+        // Le mot de passe transmis au mapper doit déjà être une empreinte BCrypt
+        when(userRepository.existsByEmail(EMAIL)).thenReturn(false);
+        when(userRepository.existsByTelephone(TELEPHONE)).thenReturn(false);
+        when(userMapper.toEntity(any(), passwordCaptor.capture())).thenReturn(user);
+        when(jwtService.generateToken(any(), any())).thenReturn("jeton-jwt");
 
-        when(userRepository.existsByEmail("jean@test.com")).thenReturn(true);
+        authService.register(registerRequest);
 
-        assertThatThrownBy(() -> authService.register(request))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("Email");
+        String empreinte = passwordCaptor.getValue();
+        assertThat(empreinte).isNotEqualTo(MOT_DE_PASSE).startsWith("$2a$12$");
+        assertThat(ENCODER.matches(MOT_DE_PASSE, empreinte)).isTrue();
     }
 
     @Test
-    void register_phoneAlreadyUsed_throwsException() {
-        RegisterRequest request = new RegisterRequest();
-        request.setEmail("nouveau@test.com");
-        request.setTelephone("0600000000");
+    void register_emailAlreadyUsed_returnsConflict() {
+        when(userRepository.existsByEmail(EMAIL)).thenReturn(true);
 
-        when(userRepository.existsByEmail("nouveau@test.com")).thenReturn(false);
-        when(userRepository.existsByTelephone("0600000000")).thenReturn(true);
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> authService.register(registerRequest));
 
-        assertThatThrownBy(() -> authService.register(request))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("Téléphone");
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(exception.getReason()).isEqualTo("Email déjà utilisé");
+        verify(userRepository, never()).save(any());
     }
 
-    // --- login ---
+    @Test
+    void register_phoneNumberAlreadyUsed_returnsConflict() {
+        when(userRepository.existsByEmail(EMAIL)).thenReturn(false);
+        when(userRepository.existsByTelephone(TELEPHONE)).thenReturn(true);
+
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> authService.register(registerRequest));
+
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(exception.getReason()).isEqualTo("Téléphone déjà utilisé");
+        verify(userRepository, never()).save(any());
+    }
+
+    // ── Connexion ──────────────────────────────────────────────────────────────
 
     @Test
-    void login_correctCredentials_returnsToken() {
-        LoginRequest request = new LoginRequest();
-        request.setEmail("jean@test.com");
-        request.setMotDePasse(RAW_PASSWORD);
+    void login_validCredentials_returnsTokenWithRole() {
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(jwtService.generateToken(EMAIL, "UTILISATEUR")).thenReturn("jeton-jwt");
 
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(jwtService.generateToken("jean@test.com", "UTILISATEUR")).thenReturn("jwtToken");
+        AuthResponse response = authService.login(loginRequest(EMAIL, MOT_DE_PASSE));
 
-        AuthResponse response = authService.login(request);
-
-        assertThat(response.getToken()).isEqualTo("jwtToken");
-        assertThat(response.getEmail()).isEqualTo("jean@test.com");
+        assertThat(response.getToken()).isEqualTo("jeton-jwt");
         assertThat(response.getRole()).isEqualTo("UTILISATEUR");
     }
 
     @Test
-    void login_unknownEmail_throwsException() {
-        LoginRequest request = new LoginRequest();
-        request.setEmail("inconnu@test.com");
-        request.setMotDePasse(RAW_PASSWORD);
+    void login_librarianAccount_tokenCarriesLibrarianRole() {
+        // Le rôle est embarqué dans le jeton : c'est lui qui pilotera les autorisations
+        user.setRole(User.Role.LIBRAIRE);
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(jwtService.generateToken(EMAIL, "LIBRAIRE")).thenReturn("jeton-libraire");
 
-        when(userRepository.findByEmail("inconnu@test.com")).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> authService.login(request))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("incorrect");
+        assertThat(authService.login(loginRequest(EMAIL, MOT_DE_PASSE)).getRole()).isEqualTo("LIBRAIRE");
     }
 
     @Test
-    void login_wrongPassword_throwsException() {
-        LoginRequest request = new LoginRequest();
-        request.setEmail("jean@test.com");
-        request.setMotDePasse("MauvaisMotDePasse@1");
+    void login_unknownEmail_returnsUnauthorized() {
+        when(userRepository.findByEmail("inconnu@email.com")).thenReturn(Optional.empty());
 
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> authService.login(loginRequest("inconnu@email.com", MOT_DE_PASSE)));
 
-        assertThatThrownBy(() -> authService.login(request))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("incorrect");
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    void login_wrongPassword_returnsUnauthorized() {
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> authService.login(loginRequest(EMAIL, "MauvaisMotDePasse")));
+
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        verify(jwtService, never()).generateToken(any(), any());
+    }
+
+    @Test
+    void login_failureMessageDoesNotRevealWhichFieldIsWrong() {
+        // Même message pour un compte inexistant et un mot de passe erroné :
+        // impossible d'énumérer les adresses inscrites.
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(userRepository.findByEmail("inconnu@email.com")).thenReturn(Optional.empty());
+
+        ResponseStatusException motDePasseErrone = assertThrows(ResponseStatusException.class,
+                () -> authService.login(loginRequest(EMAIL, "MauvaisMotDePasse")));
+
+        ResponseStatusException compteInconnu = assertThrows(ResponseStatusException.class,
+                () -> authService.login(loginRequest("inconnu@email.com", MOT_DE_PASSE)));
+
+        assertThat(motDePasseErrone.getReason()).isEqualTo(compteInconnu.getReason());
     }
 }

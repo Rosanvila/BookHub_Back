@@ -6,56 +6,82 @@ on:
   pull_request:
     branches: [ main ]
 
+# Annule une exécution encore en cours lorsqu'un nouveau commit est poussé sur la
+# même branche : inutile de continuer à valider un état déjà obsolète.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  JAVA_VERSION: '21'
 
 jobs:
+  # ── Étape 1 : compilation et tests unitaires ────────────────────────────────
+  # Ne nécessite pas Docker, donc rapide : retour en moins de deux minutes.
   unit-tests:
     name: Tests unitaires
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Récupération du code
+        uses: actions/checkout@v4
 
-      - name: Set up JDK 25
+      - name: Installation du JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
-          java-version: '25'
+          java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
+      - name: Configuration de Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Exécution des tests unitaires
+        run: ./gradlew test jacocoTestReport
+
+      - name: Vérification du seuil de couverture
+        run: ./gradlew jacocoTestCoverageVerification
+
+      - name: Publication des rapports
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
+          name: rapports-tests-unitaires
           path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: ${{ runner.os }}-gradle-
+            build/reports/tests/test
+            build/reports/jacoco/test/html
+          retention-days: 7
 
-      - name: Run unit tests
-        run: ./gradlew test
-
+  # ── Étape 2 : tests d'intégration ──────────────────────────────────────────
+  # Démarre un véritable SQL Server via Testcontainers. Plus lent, donc déclenché
+  # uniquement si les tests unitaires sont au vert.
   integration-tests:
     name: Tests d'intégration (SQL Server)
     runs-on: ubuntu-latest
+    needs: unit-tests
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Récupération du code
+        uses: actions/checkout@v4
 
-      - name: Set up JDK 25
+      - name: Installation du JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
-          java-version: '25'
+          java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: ${{ runner.os }}-gradle-
+      - name: Configuration de Gradle
+        uses: gradle/actions/setup-gradle@v4
 
-      - name: Run integration tests
+      - name: Exécution des tests d'intégration
         run: ./gradlew integrationTest
+
+      - name: Publication des rapports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rapports-tests-integration
+          path: build/reports/tests/integrationTest
+          retention-days: 7

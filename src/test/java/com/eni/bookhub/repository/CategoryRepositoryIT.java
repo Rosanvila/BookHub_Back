@@ -2,50 +2,47 @@ package com.eni.bookhub.repository;
 
 import com.eni.bookhub.AbstractIntegrationTest;
 import com.eni.bookhub.entity.Category;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 
-import java.util.List;
-
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Tests d'intégration du dépôt des catégories.
+ * <p>
+ * Seule {@code findByNomIgnoreCase} est une requête écrite pour BookHub : c'est donc
+ * la seule qui mérite d'être testée. Les méthodes héritées de Spring Data
+ * ({@code save}, {@code findById}...) sont déjà couvertes par le framework lui-même.
+ */
 class CategoryRepositoryIT extends AbstractIntegrationTest {
 
     @Autowired
     private CategoryRepository categoryRepository;
 
-    @Test
-    void save_andFindAll_returnsCategories() {
-        categoryRepository.save(Category.builder().nom("Roman").build());
-        categoryRepository.save(Category.builder().nom("Science").build());
-
-        List<Category> result = categoryRepository.findAll();
-
-        assertThat(result).extracting(Category::getNom)
-                .contains("Roman", "Science");
+    @BeforeEach
+    void setUp() {
+        categoryRepository.save(Category.builder().nom("Science-Fiction").build());
     }
 
     @Test
-    void findById_existingId_returnsCategory() {
-        Category saved = categoryRepository.save(Category.builder().nom("Policier").build());
-
-        assertThat(categoryRepository.findById(saved.getId()))
+    void findByNomIgnoreCase_exactName_returnsCategory() {
+        assertThat(categoryRepository.findByNomIgnoreCase("Science-Fiction"))
                 .isPresent()
                 .get()
                 .extracting(Category::getNom)
-                .isEqualTo("Policier");
+                .isEqualTo("Science-Fiction");
     }
 
     @Test
-    void findById_unknownId_returnsEmpty() {
-        assertThat(categoryRepository.findById(9999)).isEmpty();
+    void findByNomIgnoreCase_differentCase_stillReturnsCategory() {
+        // Le filtre par catégorie du catalogue ne doit pas dépendre de la casse saisie
+        assertThat(categoryRepository.findByNomIgnoreCase("science-fiction")).isPresent();
+        assertThat(categoryRepository.findByNomIgnoreCase("SCIENCE-FICTION")).isPresent();
     }
 
     @Test
-    void delete_removesCategory() {
-        Category saved = categoryRepository.save(Category.builder().nom("Fantaisie").build());
-        categoryRepository.delete(saved);
-
-        assertThat(categoryRepository.findById(saved.getId())).isEmpty();
+    void findByNomIgnoreCase_unknownName_returnsEmpty() {
+        assertThat(categoryRepository.findByNomIgnoreCase("Poésie")).isEmpty();
     }
 }

@@ -6,10 +6,13 @@ import com.eni.bookhub.entity.Book;
 import com.eni.bookhub.entity.Reservation;
 import com.eni.bookhub.entity.User;
 import com.eni.bookhub.mapper.ReservationMapper;
+import com.eni.bookhub.notification.MailService;
 import com.eni.bookhub.repository.BookRepository;
 import com.eni.bookhub.repository.ReservationRepository;
 import com.eni.bookhub.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,6 +25,8 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ReservationService {
 
+    private static final Logger log = LoggerFactory.getLogger(ReservationService.class);
+
     private static final List<Reservation.Status> ACTIVE_STATUSES =
             List.of(Reservation.Status.EN_ATTENTE, Reservation.Status.DISPONIBLE);
 
@@ -30,6 +35,7 @@ public class ReservationService {
     private final UserRepository userRepository;
     private final LoanService loanService;
     private final ReservationMapper reservationMapper;
+    private final MailService mailService;
 
     @Transactional
     public ReservationResponse createReservation(String email, ReservationRequest request) {
@@ -132,6 +138,13 @@ public class ReservationService {
         reservation.setStatus(Reservation.Status.DISPONIBLE);
         reservationRepository.save(reservation);
         shiftRanksDown(book.getId(), validatedRank);
+
+        try {
+            mailService.sendReservationAvailable(reservation);
+        } catch (Exception e) {
+            log.warn("Échec de l'envoi de l'email de réservation disponible pour la réservation {}", reservationId, e);
+        }
+
         return reservationMapper.toResponse(reservation);
     }
 

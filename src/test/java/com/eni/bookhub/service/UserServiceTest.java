@@ -13,26 +13,38 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDateTime;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
+/**
+ * Tests de la gestion du compte adhérent.
+ * <p>
+ * Le service instancie lui-même son {@link BCryptPasswordEncoder} : il ne peut donc pas
+ * être remplacé par un mock. Les tests utilisent de véritables empreintes BCrypt, ce qui
+ * a l'avantage de vérifier réellement la comparaison des mots de passe.
+ */
 @ExtendWith(MockitoExtension.class)
 class UserServiceTest {
 
-    @Mock private UserRepository userRepository;
-    @Mock private UserMapper userMapper;
+    private static final String EMAIL = "jean.dupont@email.com";
+    private static final String MOT_DE_PASSE = "MotDePasse@2026";
 
-    @InjectMocks private UserService userService;
+    private static final BCryptPasswordEncoder ENCODER = new BCryptPasswordEncoder(12);
 
-    private static final BCryptPasswordEncoder TEST_ENCODER = new BCryptPasswordEncoder(4);
-    private static final String RAW_PASSWORD = "Test@1234567890";
-    private static final String ENCODED_PASSWORD = TEST_ENCODER.encode(RAW_PASSWORD);
+    @Mock
+    private UserRepository userRepository;
+    @Mock
+    private UserMapper userMapper;
+
+    @InjectMocks
+    private UserService userService;
 
     private User user;
 
@@ -42,156 +54,170 @@ class UserServiceTest {
                 .id(1)
                 .nom("Dupont")
                 .prenom("Jean")
-                .email("jean@test.com")
-                .telephone("0600000000")
-                .motDePasse(ENCODED_PASSWORD)
+                .email(EMAIL)
+                .telephone("0612345678")
+                .motDePasse(ENCODER.encode(MOT_DE_PASSE))
                 .role(User.Role.UTILISATEUR)
-                .dateCreation(LocalDateTime.now())
+                .dateCreation(LocalDateTime.of(2026, 1, 15, 10, 0))
                 .build();
     }
 
-    // --- getProfile ---
+    /*
+     * Ces deux DTO n'exposent que des accesseurs en lecture : ils sont normalement
+     * remplis par Jackson à la désérialisation. On les alimente donc par réflexion.
+     */
+
+    private UpdateProfileRequest profileRequest(String telephone) {
+        UpdateProfileRequest request = new UpdateProfileRequest();
+        ReflectionTestUtils.setField(request, "nom", "Durand");
+        ReflectionTestUtils.setField(request, "prenom", "Jeanne");
+        ReflectionTestUtils.setField(request, "telephone", telephone);
+        return request;
+    }
+
+    private UpdatePasswordRequest passwordRequest(String ancien, String nouveau) {
+        UpdatePasswordRequest request = new UpdatePasswordRequest();
+        ReflectionTestUtils.setField(request, "ancienMotDePasse", ancien);
+        ReflectionTestUtils.setField(request, "nouveauMotDePasse", nouveau);
+        return request;
+    }
+
+    // ── Consultation du profil ─────────────────────────────────────────────────
 
     @Test
-    void getProfile_userFound_returnsResponse() {
-        UserResponse expected = UserResponse.builder().id(1).email("jean@test.com").build();
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(userMapper.toResponse(user)).thenReturn(expected);
+    void getProfile_knownEmail_returnsProfile() {
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(userMapper.toResponse(user)).thenReturn(UserResponse.builder().id(1).nom("Dupont").build());
 
-        UserResponse result = userService.getProfile("jean@test.com");
+        UserResponse response = userService.getProfile(EMAIL);
 
-        assertThat(result).isEqualTo(expected);
+        assertThat(response.getNom()).isEqualTo("Dupont");
     }
 
     @Test
-    void getProfile_userNotFound_throwsException() {
-        when(userRepository.findByEmail("inconnu@test.com")).thenReturn(Optional.empty());
+    void getProfile_unknownEmail_isRejected() {
+        when(userRepository.findByEmail("inconnu@email.com")).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> userService.getProfile("inconnu@test.com"))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("introuvable");
+        RuntimeException exception = assertThrows(RuntimeException.class,
+                () -> userService.getProfile("inconnu@email.com"));
+
+        assertThat(exception.getMessage()).isEqualTo("Utilisateur introuvable");
     }
 
-    // --- updateProfile ---
+    // ── Modification du profil ─────────────────────────────────────────────────
 
     @Test
-    void updateProfile_samePhone_updatesWithoutConflictCheck() {
-        UpdateProfileRequest request = mock(UpdateProfileRequest.class);
-        when(request.getNom()).thenReturn("Martin");
-        when(request.getPrenom()).thenReturn("Pierre");
-        when(request.getTelephone()).thenReturn("0600000000"); // même téléphone
+    void updateProfile_newPhoneNumberIsFree_appliesChanges() {
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(userRepository.existsByTelephoneAndIdNot("0798765432", 1)).thenReturn(false);
+        when(userRepository.save(user)).thenReturn(user);
 
-        UserResponse expected = UserResponse.builder().id(1).nom("Martin").build();
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(userRepository.save(any())).thenReturn(user);
-        when(userMapper.toResponse(any())).thenReturn(expected);
+        userService.updateProfile(EMAIL, profileRequest("0798765432"));
 
-        UserResponse result = userService.updateProfile("jean@test.com", request);
+        assertThat(user.getNom()).isEqualTo("Durand");
+        assertThat(user.getPrenom()).isEqualTo("Jeanne");
+        assertThat(user.getTelephone()).isEqualTo("0798765432");
+    }
 
-        assertThat(result).isEqualTo(expected);
+    @Test
+    void updateProfile_unchangedPhoneNumber_skipsUniquenessCheck() {
+        // Conserver son propre numéro ne doit pas déclencher de conflit avec soi-même
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(userRepository.save(user)).thenReturn(user);
+
+        userService.updateProfile(EMAIL, profileRequest("0612345678"));
+
         verify(userRepository, never()).existsByTelephoneAndIdNot(any(), any());
     }
 
     @Test
-    void updateProfile_newPhoneAlreadyUsed_throwsException() {
-        UpdateProfileRequest request = mock(UpdateProfileRequest.class);
-        when(request.getTelephone()).thenReturn("0611111111"); // téléphone différent
+    void updateProfile_phoneNumberUsedByAnotherAccount_isRejected() {
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(userRepository.existsByTelephoneAndIdNot("0798765432", 1)).thenReturn(true);
 
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(userRepository.existsByTelephoneAndIdNot("0611111111", 1)).thenReturn(true);
+        RuntimeException exception = assertThrows(RuntimeException.class,
+                () -> userService.updateProfile(EMAIL, profileRequest("0798765432")));
 
-        assertThatThrownBy(() -> userService.updateProfile("jean@test.com", request))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("Téléphone");
+        assertThat(exception.getMessage()).isEqualTo("Téléphone déjà utilisé");
+        verify(userRepository, never()).save(any());
     }
 
     @Test
-    void updateProfile_newPhoneAvailable_updatesSuccessfully() {
-        UpdateProfileRequest request = mock(UpdateProfileRequest.class);
-        when(request.getNom()).thenReturn("Martin");
-        when(request.getPrenom()).thenReturn("Pierre");
-        when(request.getTelephone()).thenReturn("0622222222");
+    void updateProfile_unknownEmail_isRejected() {
+        when(userRepository.findByEmail("inconnu@email.com")).thenReturn(Optional.empty());
 
-        UserResponse expected = UserResponse.builder().id(1).build();
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(userRepository.existsByTelephoneAndIdNot("0622222222", 1)).thenReturn(false);
-        when(userRepository.save(any())).thenReturn(user);
-        when(userMapper.toResponse(any())).thenReturn(expected);
+        RuntimeException exception = assertThrows(RuntimeException.class,
+                () -> userService.updateProfile("inconnu@email.com", profileRequest("0798765432")));
 
-        UserResponse result = userService.updateProfile("jean@test.com", request);
-
-        assertThat(result).isEqualTo(expected);
-        assertThat(user.getNom()).isEqualTo("Martin");
-        assertThat(user.getPrenom()).isEqualTo("Pierre");
-        assertThat(user.getTelephone()).isEqualTo("0622222222");
+        assertThat(exception.getMessage()).isEqualTo("Utilisateur introuvable");
     }
 
-    @Test
-    void updateProfile_userNotFound_throwsException() {
-        UpdateProfileRequest request = mock(UpdateProfileRequest.class);
-        when(userRepository.findByEmail("inconnu@test.com")).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> userService.updateProfile("inconnu@test.com", request))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("introuvable");
-    }
-
-    // --- updatePassword ---
+    // ── Changement de mot de passe ─────────────────────────────────────────────
 
     @Test
-    void updatePassword_correctOldPassword_updatesPassword() {
-        UpdatePasswordRequest request = mock(UpdatePasswordRequest.class);
-        when(request.getAncienMotDePasse()).thenReturn(RAW_PASSWORD);
-        when(request.getNouveauMotDePasse()).thenReturn("NewPass@12345678");
+    void updatePassword_correctCurrentPassword_storesNewHash() {
+        String ancienneEmpreinte = user.getMotDePasse();
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
 
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(userRepository.save(any())).thenReturn(user);
+        userService.updatePassword(EMAIL, passwordRequest(MOT_DE_PASSE, "NouveauMotDePasse@2026"));
 
-        userService.updatePassword("jean@test.com", request);
-
+        assertThat(user.getMotDePasse()).isNotEqualTo(ancienneEmpreinte);
+        assertThat(ENCODER.matches("NouveauMotDePasse@2026", user.getMotDePasse())).isTrue();
         verify(userRepository).save(user);
-        assertThat(user.getMotDePasse()).isNotEqualTo(ENCODED_PASSWORD);
     }
 
     @Test
-    void updatePassword_wrongOldPassword_throwsException() {
-        UpdatePasswordRequest request = mock(UpdatePasswordRequest.class);
-        when(request.getAncienMotDePasse()).thenReturn("MauvaisMotDePasse@1");
+    void updatePassword_neverStoresPasswordInPlainText() {
+        // Vérification explicite : l'empreinte enregistrée ne doit jamais être le mot de passe saisi
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
 
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
+        userService.updatePassword(EMAIL, passwordRequest(MOT_DE_PASSE, "NouveauMotDePasse@2026"));
 
-        assertThatThrownBy(() -> userService.updatePassword("jean@test.com", request))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("Ancien mot de passe incorrect");
+        assertThat(user.getMotDePasse())
+                .isNotEqualTo("NouveauMotDePasse@2026")
+                .startsWith("$2a$12$");
     }
 
     @Test
-    void updatePassword_userNotFound_throwsException() {
-        UpdatePasswordRequest request = mock(UpdatePasswordRequest.class);
-        when(userRepository.findByEmail("inconnu@test.com")).thenReturn(Optional.empty());
+    void updatePassword_wrongCurrentPassword_isRejected() {
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
 
-        assertThatThrownBy(() -> userService.updatePassword("inconnu@test.com", request))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("introuvable");
+        RuntimeException exception = assertThrows(RuntimeException.class,
+                () -> userService.updatePassword(EMAIL, passwordRequest("MauvaisMotDePasse", "NouveauMotDePasse@2026")));
+
+        assertThat(exception.getMessage()).isEqualTo("Ancien mot de passe incorrect");
+        verify(userRepository, never()).save(any());
     }
 
-    // --- deleteAccount ---
+    @Test
+    void updatePassword_unknownEmail_isRejected() {
+        when(userRepository.findByEmail("inconnu@email.com")).thenReturn(Optional.empty());
+
+        RuntimeException exception = assertThrows(RuntimeException.class,
+                () -> userService.updatePassword("inconnu@email.com", passwordRequest(MOT_DE_PASSE, "Nouveau@2026")));
+
+        assertThat(exception.getMessage()).isEqualTo("Utilisateur introuvable");
+    }
+
+    // ── Suppression du compte ──────────────────────────────────────────────────
 
     @Test
-    void deleteAccount_userFound_deletesUser() {
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
+    void deleteAccount_knownEmail_deletesUser() {
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
 
-        userService.deleteAccount("jean@test.com");
+        userService.deleteAccount(EMAIL);
 
         verify(userRepository).delete(user);
     }
 
     @Test
-    void deleteAccount_userNotFound_throwsException() {
-        when(userRepository.findByEmail("inconnu@test.com")).thenReturn(Optional.empty());
+    void deleteAccount_unknownEmail_isRejected() {
+        when(userRepository.findByEmail("inconnu@email.com")).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> userService.deleteAccount("inconnu@test.com"))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("introuvable");
+        RuntimeException exception = assertThrows(RuntimeException.class,
+                () -> userService.deleteAccount("inconnu@email.com"));
+
+        assertThat(exception.getMessage()).isEqualTo("Utilisateur introuvable");
+        verify(userRepository, never()).delete(any(User.class));
     }
 }

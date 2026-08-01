@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 0; }
+        .container { max-width: 600px; margin: 30px auto; background-color: #ffffff; border-radius: 8px; overflow: hidden; }
+        .header { background-color: #2c3e50; padding: 24px; text-align: center; }
+        .header h1 { color: #ffffff; margin: 0; font-size: 22px; }
+        .content { padding: 32px; color: #333333; }
+        .content h2 { font-size: 18px; margin-bottom: 16px; }
+        .info-box { background-color: #f0f4f8; border-left: 4px solid #2c3e50; padding: 16px; border-radius: 4px; margin: 20px 0; }
+        .info-box p { margin: 6px 0; font-size: 15px; }
+        .footer { background-color: #f4f4f4; padding: 16px; text-align: center; font-size: 12px; color: #888888; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>📚 BookHub</h1>
+    </div>
+    <div class="content">
+        <h2>Bonjour <span th:text="${prenom}">Prénom</span>,</h2>
+        <p>Votre emprunt a bien été enregistré. Voici le récapitulatif :</p>
+        <div class="info-box">
+            <p><strong>Livre :</strong> <span th:text="${titre}">Titre du livre</span></p>
+            <p><strong>Auteur :</strong> <span th:text="${auteur}">Auteur</span></p>
+            <p><strong>Date d'emprunt :</strong> <span th:text="${dateEmprunt}">00/00/0000</span></p>
+            <p><strong>Retour prévu le :</strong> <span th:text="${dateRetour}">00/00/0000</span></p>
+        </div>
+        <p>Merci de rendre le livre avant la date prévue pour ne pas bloquer votre compte.</p>
+    </div>
+    <div class="footer">
+        <p>Bibliothèque communautaire — Quartier Solidaire</p>
+        <p>Cet email est envoyé automatiquement, merci de ne pas y répondre.</p>
+    </div>
+</div>
+</body>
+</html>

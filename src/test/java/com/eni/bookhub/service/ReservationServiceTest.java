@@ -1,12 +1,12 @@
 package com.eni.bookhub.service;
 
 import com.eni.bookhub.dto.request.ReservationRequest;
-import com.eni.bookhub.dto.response.LoanResponse;
 import com.eni.bookhub.dto.response.ReservationResponse;
 import com.eni.bookhub.entity.Book;
 import com.eni.bookhub.entity.Reservation;
 import com.eni.bookhub.entity.User;
 import com.eni.bookhub.mapper.ReservationMapper;
+import com.eni.bookhub.notification.MailService;
 import com.eni.bookhub.repository.BookRepository;
 import com.eni.bookhub.repository.ReservationRepository;
 import com.eni.bookhub.repository.UserRepository;
@@ -14,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -24,322 +25,360 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
-import static com.eni.bookhub.entity.Reservation.Status.*;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
+/**
+ * Tests des règles de gestion des réservations.
+ * <p>
+ * Ce service lève des {@link ResponseStatusException} : le code HTTP fait partie du
+ * contrat métier, les tests le vérifient au même titre que le message.
+ */
 @ExtendWith(MockitoExtension.class)
 class ReservationServiceTest {
 
-    @Mock private ReservationRepository reservationRepository;
-    @Mock private BookRepository bookRepository;
-    @Mock private UserRepository userRepository;
-    @Mock private LoanService loanService;
-    @Mock private ReservationMapper reservationMapper;
+    private static final String EMAIL = "jean.dupont@email.com";
 
-    @InjectMocks private ReservationService reservationService;
+    /** Statuts considérés comme actifs par le service. */
+    private static final List<Reservation.Status> ACTIFS =
+            List.of(Reservation.Status.EN_ATTENTE, Reservation.Status.DISPONIBLE);
 
-    private static final List<Reservation.Status> ACTIVE = List.of(EN_ATTENTE, DISPONIBLE);
+    @Mock
+    private ReservationRepository reservationRepository;
+    @Mock
+    private BookRepository bookRepository;
+    @Mock
+    private UserRepository userRepository;
+    @Mock
+    private LoanService loanService;
+    @Mock
+    private ReservationMapper reservationMapper;
+    @Mock
+    private MailService mailService;
+
+    @InjectMocks
+    private ReservationService reservationService;
+
+    @Captor
+    private ArgumentCaptor<Reservation> reservationCaptor;
 
     private User user;
     private Book book;
-    private Reservation reservation;
+    private ReservationRequest request;
 
     @BeforeEach
     void setUp() {
         user = User.builder()
-                .id(1).nom("Dupont").prenom("Jean")
-                .email("jean@test.com")
+                .id(1)
+                .nom("Dupont")
+                .prenom("Jean")
+                .email(EMAIL)
                 .role(User.Role.UTILISATEUR)
                 .build();
 
         book = Book.builder()
-                .id(1).titre("Dune")
-                .totalExemplaires(3)
-                .exemplairesDisponibles(3)
+                .id(5)
+                .titre("Dune")
+                .totalExemplaires(5)
+                .exemplairesDisponibles(2)
                 .build();
 
-        reservation = Reservation.builder()
-                .id(1)
+        request = new ReservationRequest();
+        request.setBookId(5);
+    }
+
+    private Reservation reservation(Reservation.Status status, int rang) {
+        return Reservation.builder()
+                .id(99)
                 .user(user)
                 .book(book)
                 .reservationDate(LocalDateTime.now())
-                .rankWaitingList(1)
-                .status(EN_ATTENTE)
+                .rankWaitingList(rang)
+                .status(status)
                 .build();
     }
 
-    // ── createReservation ──────────────────────────────────────────────────────
+    /** Place le contexte du cas nominal : adhérent connu, livre disponible, aucun blocage. */
+    private void givenReservationIsAllowed(int reservationsEnAttente) {
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(bookRepository.findById(5)).thenReturn(Optional.of(book));
+        when(reservationRepository.existsByUserIdAndBookIdAndStatusIn(1, 5, ACTIFS)).thenReturn(false);
+        when(reservationRepository.countByUserIdAndStatusIn(1, ACTIFS)).thenReturn(0);
+        when(reservationRepository.countByBookIdAndStatus(5, Reservation.Status.EN_ATTENTE))
+                .thenReturn(reservationsEnAttente);
+        when(reservationRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+    }
+
+    // ── Créer une réservation ──────────────────────────────────────────────────
 
     @Test
-    void createReservation_success_createsReservationWithCorrectRank() {
-        ReservationRequest request = new ReservationRequest();
-        request.setBookId(1);
+    void createReservation_allConditionsMet_savesPendingReservation() {
+        givenReservationIsAllowed(0);
 
-        ReservationResponse expected = new ReservationResponse();
-        expected.setStatus("EN_ATTENTE");
-        expected.setRankWaitingList(2);
+        reservationService.createReservation(EMAIL, request);
 
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(bookRepository.findById(1)).thenReturn(Optional.of(book));
-        when(reservationRepository.existsByUserIdAndBookIdAndStatusIn(1, 1, ACTIVE)).thenReturn(false);
-        when(reservationRepository.countByUserIdAndStatusIn(1, ACTIVE)).thenReturn(2);
-        when(reservationRepository.countByBookIdAndStatus(1, EN_ATTENTE)).thenReturn(1);
-        when(reservationRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
-        when(reservationMapper.toResponse(any())).thenReturn(expected);
-
-        ReservationResponse result = reservationService.createReservation("jean@test.com", request);
-
-        assertThat(result.getStatus()).isEqualTo("EN_ATTENTE");
-        assertThat(result.getRankWaitingList()).isEqualTo(2);
+        verify(reservationRepository).save(reservationCaptor.capture());
+        Reservation saved = reservationCaptor.getValue();
+        assertThat(saved.getUser()).isEqualTo(user);
+        assertThat(saved.getBook()).isEqualTo(book);
+        assertThat(saved.getStatus()).isEqualTo(Reservation.Status.EN_ATTENTE);
     }
 
     @Test
-    void createReservation_rankIsNextInQueue() {
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(bookRepository.findById(1)).thenReturn(Optional.of(book));
-        when(reservationRepository.existsByUserIdAndBookIdAndStatusIn(1, 1, ACTIVE)).thenReturn(false);
-        when(reservationRepository.countByUserIdAndStatusIn(1, ACTIVE)).thenReturn(1);
-        when(reservationRepository.countByBookIdAndStatus(1, EN_ATTENTE)).thenReturn(3);
-        when(reservationMapper.toResponse(any())).thenReturn(new ReservationResponse());
+    void createReservation_placesUserAtEndOfWaitingList() {
+        // Trois adhérents attendent déjà : le nouveau prend le rang 4
+        givenReservationIsAllowed(3);
 
-        ArgumentCaptor<Reservation> captor = ArgumentCaptor.forClass(Reservation.class);
-        when(reservationRepository.save(captor.capture())).thenAnswer(inv -> inv.getArgument(0));
+        reservationService.createReservation(EMAIL, request);
 
-        reservationService.createReservation("jean@test.com", request(1));
-
-        assertThat(captor.getValue().getRankWaitingList()).isEqualTo(4);
+        verify(reservationRepository).save(reservationCaptor.capture());
+        assertThat(reservationCaptor.getValue().getRankWaitingList()).isEqualTo(4);
     }
 
     @Test
-    void createReservation_noExemplairesDisponibles_throwsBadRequest() {
+    void createReservation_unknownUser_returnsNotFound() {
+        when(userRepository.findByEmail("inconnu@email.com")).thenReturn(Optional.empty());
+
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> reservationService.createReservation("inconnu@email.com", request));
+
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(exception.getReason()).isEqualTo("Utilisateur introuvable");
+    }
+
+    @Test
+    void createReservation_unknownBook_returnsNotFound() {
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(bookRepository.findById(5)).thenReturn(Optional.empty());
+
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> reservationService.createReservation(EMAIL, request));
+
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(exception.getReason()).isEqualTo("Livre introuvable");
+    }
+
+    @Test
+    void createReservation_bookOutOfStock_returnsBadRequest() {
         book.setExemplairesDisponibles(0);
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(bookRepository.findById(5)).thenReturn(Optional.of(book));
 
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(bookRepository.findById(1)).thenReturn(Optional.of(book));
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> reservationService.createReservation(EMAIL, request));
 
-        assertThatThrownBy(() -> reservationService.createReservation("jean@test.com", request(1)))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode())
-                        .isEqualTo(HttpStatus.BAD_REQUEST));
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     @Test
-    void createReservation_alreadyHasActiveReservation_throwsConflict() {
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(bookRepository.findById(1)).thenReturn(Optional.of(book));
-        when(reservationRepository.existsByUserIdAndBookIdAndStatusIn(1, 1, ACTIVE)).thenReturn(true);
+    void createReservation_sameBookAlreadyReserved_returnsConflict() {
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(bookRepository.findById(5)).thenReturn(Optional.of(book));
+        when(reservationRepository.existsByUserIdAndBookIdAndStatusIn(1, 5, ACTIFS)).thenReturn(true);
 
-        assertThatThrownBy(() -> reservationService.createReservation("jean@test.com", request(1)))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode())
-                        .isEqualTo(HttpStatus.CONFLICT));
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> reservationService.createReservation(EMAIL, request));
+
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(exception.getReason()).contains("déjà une réservation active");
+        verify(reservationRepository, never()).save(any());
     }
 
     @Test
-    void createReservation_maxFiveActiveReservations_throwsConflict() {
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(bookRepository.findById(1)).thenReturn(Optional.of(book));
-        when(reservationRepository.existsByUserIdAndBookIdAndStatusIn(1, 1, ACTIVE)).thenReturn(false);
-        when(reservationRepository.countByUserIdAndStatusIn(1, ACTIVE)).thenReturn(5);
+    void createReservation_fiveActiveReservations_returnsConflict() {
+        // Règle de gestion : cinq réservations actives au maximum par adhérent
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(bookRepository.findById(5)).thenReturn(Optional.of(book));
+        when(reservationRepository.existsByUserIdAndBookIdAndStatusIn(1, 5, ACTIFS)).thenReturn(false);
+        when(reservationRepository.countByUserIdAndStatusIn(1, ACTIFS)).thenReturn(5);
 
-        assertThatThrownBy(() -> reservationService.createReservation("jean@test.com", request(1)))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode())
-                        .isEqualTo(HttpStatus.CONFLICT));
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> reservationService.createReservation(EMAIL, request));
+
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(exception.getReason()).contains("maximum de 5 réservations");
+        verify(reservationRepository, never()).save(any());
     }
 
-    @Test
-    void createReservation_userNotFound_throws404() {
-        when(userRepository.findByEmail("inconnu@test.com")).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> reservationService.createReservation("inconnu@test.com", request(1)))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode())
-                        .isEqualTo(HttpStatus.NOT_FOUND));
-    }
+    // ── Annuler une réservation ────────────────────────────────────────────────
 
     @Test
-    void createReservation_bookNotFound_throws404() {
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(bookRepository.findById(99)).thenReturn(Optional.empty());
+    void cancelReservation_ownerCancelsOwnReservation_setsStatusCancelled() {
+        Reservation reservation = reservation(Reservation.Status.EN_ATTENTE, 2);
+        when(reservationRepository.findById(99)).thenReturn(Optional.of(reservation));
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(reservationRepository.findByBookIdAndStatusAndRankWaitingListGreaterThan(
+                5, Reservation.Status.EN_ATTENTE, 2)).thenReturn(List.of());
 
-        assertThatThrownBy(() -> reservationService.createReservation("jean@test.com", request(99)))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode())
-                        .isEqualTo(HttpStatus.NOT_FOUND));
-    }
+        reservationService.cancelReservation(EMAIL, 99, false);
 
-    // ── getMyReservations ──────────────────────────────────────────────────────
-
-    @Test
-    void getMyReservations_returnsUserReservations() {
-        ReservationResponse response = new ReservationResponse();
-        response.setId(1);
-
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(reservationRepository.findByUserId(1)).thenReturn(List.of(reservation));
-        when(reservationMapper.toResponse(reservation)).thenReturn(response);
-
-        List<ReservationResponse> result = reservationService.getMyReservations("jean@test.com");
-
-        assertThat(result).hasSize(1);
-        assertThat(result.get(0).getId()).isEqualTo(1);
-    }
-
-    @Test
-    void getMyReservations_userNotFound_throws404() {
-        when(userRepository.findByEmail("inconnu@test.com")).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> reservationService.getMyReservations("inconnu@test.com"))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode())
-                        .isEqualTo(HttpStatus.NOT_FOUND));
-    }
-
-    // ── getAllReservations ─────────────────────────────────────────────────────
-
-    @Test
-    void getAllReservations_returnsAllReservations() {
-        ReservationResponse response = new ReservationResponse();
-        response.setId(1);
-
-        when(reservationRepository.findAll()).thenReturn(List.of(reservation));
-        when(reservationMapper.toResponse(reservation)).thenReturn(response);
-
-        List<ReservationResponse> result = reservationService.getAllReservations();
-
-        assertThat(result).hasSize(1);
-    }
-
-    // ── cancelReservation ──────────────────────────────────────────────────────
-
-    @Test
-    void cancelReservation_byOwner_cancelsAndShiftsRanks() {
-        Reservation r2 = Reservation.builder()
-                .id(2).user(user).book(book)
-                .rankWaitingList(2).status(EN_ATTENTE).build();
-
-        when(reservationRepository.findById(1)).thenReturn(Optional.of(reservation));
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
-        when(reservationRepository.findByBookIdAndStatusAndRankWaitingListGreaterThan(1, EN_ATTENTE, 1))
-                .thenReturn(List.of(r2));
-
-        reservationService.cancelReservation("jean@test.com", 1, false);
-
-        assertThat(reservation.getStatus()).isEqualTo(ANNULEE);
-        assertThat(r2.getRankWaitingList()).isEqualTo(1);
+        assertThat(reservation.getStatus()).isEqualTo(Reservation.Status.ANNULEE);
         verify(reservationRepository).save(reservation);
-        verify(reservationRepository).saveAll(List.of(r2));
     }
 
     @Test
-    void cancelReservation_byStaff_skipsOwnerCheck() {
-        User anotherUser = User.builder().id(99).email("other@test.com").build();
-        Reservation otherReservation = Reservation.builder()
-                .id(5).user(anotherUser).book(book)
-                .rankWaitingList(1).status(EN_ATTENTE).build();
+    void cancelReservation_shiftsFollowingUsersUpTheWaitingList() {
+        // La réservation annulée était au rang 2 : les rangs 3 et 4 remontent en 2 et 3
+        Reservation cancelled = reservation(Reservation.Status.EN_ATTENTE, 2);
+        Reservation troisieme = Reservation.builder().id(100).book(book).rankWaitingList(3).build();
+        Reservation quatrieme = Reservation.builder().id(101).book(book).rankWaitingList(4).build();
 
-        when(reservationRepository.findById(5)).thenReturn(Optional.of(otherReservation));
-        when(reservationRepository.findByBookIdAndStatusAndRankWaitingListGreaterThan(1, EN_ATTENTE, 1))
-                .thenReturn(List.of());
+        when(reservationRepository.findById(99)).thenReturn(Optional.of(cancelled));
+        when(reservationRepository.findByBookIdAndStatusAndRankWaitingListGreaterThan(
+                5, Reservation.Status.EN_ATTENTE, 2)).thenReturn(List.of(troisieme, quatrieme));
 
-        reservationService.cancelReservation("libraire@test.com", 5, true);
+        reservationService.cancelReservation(EMAIL, 99, true);
 
-        assertThat(otherReservation.getStatus()).isEqualTo(ANNULEE);
+        assertThat(troisieme.getRankWaitingList()).isEqualTo(2);
+        assertThat(quatrieme.getRankWaitingList()).isEqualTo(3);
+        verify(reservationRepository).saveAll(List.of(troisieme, quatrieme));
+    }
+
+    @Test
+    void cancelReservation_staffCancelsWithoutOwnershipCheck() {
+        // Un bibliothécaire peut annuler la réservation d'un adhérent :
+        // son propre compte n'est même pas consulté.
+        Reservation reservation = reservation(Reservation.Status.EN_ATTENTE, 1);
+        when(reservationRepository.findById(99)).thenReturn(Optional.of(reservation));
+        when(reservationRepository.findByBookIdAndStatusAndRankWaitingListGreaterThan(
+                5, Reservation.Status.EN_ATTENTE, 1)).thenReturn(List.of());
+
+        reservationService.cancelReservation("bibliothecaire@email.com", 99, true);
+
+        assertThat(reservation.getStatus()).isEqualTo(Reservation.Status.ANNULEE);
         verify(userRepository, never()).findByEmail(any());
     }
 
     @Test
-    void cancelReservation_notOwner_throwsForbidden() {
-        User anotherUser = User.builder().id(2).email("autre@test.com").build();
+    void cancelReservation_otherUsersReservation_returnsForbidden() {
+        User autreAdherent = User.builder().id(2).email("autre@email.com").build();
+        Reservation reservation = reservation(Reservation.Status.EN_ATTENTE, 1);
+        when(reservationRepository.findById(99)).thenReturn(Optional.of(reservation));
+        when(userRepository.findByEmail("autre@email.com")).thenReturn(Optional.of(autreAdherent));
 
-        when(reservationRepository.findById(1)).thenReturn(Optional.of(reservation));
-        when(userRepository.findByEmail("autre@test.com")).thenReturn(Optional.of(anotherUser));
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> reservationService.cancelReservation("autre@email.com", 99, false));
 
-        assertThatThrownBy(() -> reservationService.cancelReservation("autre@test.com", 1, false))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode())
-                        .isEqualTo(HttpStatus.FORBIDDEN));
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        verify(reservationRepository, never()).save(any());
     }
 
     @Test
-    void cancelReservation_alreadyAnnulee_throwsBadRequest() {
-        reservation.setStatus(ANNULEE);
+    void cancelReservation_alreadyCancelled_returnsBadRequest() {
+        Reservation reservation = reservation(Reservation.Status.ANNULEE, 1);
+        when(reservationRepository.findById(99)).thenReturn(Optional.of(reservation));
 
-        when(reservationRepository.findById(1)).thenReturn(Optional.of(reservation));
-        when(userRepository.findByEmail("jean@test.com")).thenReturn(Optional.of(user));
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> reservationService.cancelReservation(EMAIL, 99, true));
 
-        assertThatThrownBy(() -> reservationService.cancelReservation("jean@test.com", 1, false))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode())
-                        .isEqualTo(HttpStatus.BAD_REQUEST));
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).contains("ne peut pas être annulée");
     }
 
     @Test
-    void cancelReservation_reservationNotFound_throws404() {
-        when(reservationRepository.findById(99)).thenReturn(Optional.empty());
+    void cancelReservation_unknownReservation_returnsNotFound() {
+        when(reservationRepository.findById(404)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> reservationService.cancelReservation("jean@test.com", 99, false))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode())
-                        .isEqualTo(HttpStatus.NOT_FOUND));
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> reservationService.cancelReservation(EMAIL, 404, true));
+
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(exception.getReason()).isEqualTo("Réservation introuvable");
     }
 
-    // ── validateReservation ────────────────────────────────────────────────────
+    // ── Valider une réservation ────────────────────────────────────────────────
 
     @Test
-    void validateReservation_enAttente_createsLoanAndSetsDisponible() {
-        Reservation r2 = Reservation.builder()
-                .id(2).user(user).book(book)
-                .rankWaitingList(2).status(EN_ATTENTE).build();
+    void validateReservation_pendingReservation_createsLoanAndMarksAvailable() {
+        Reservation reservation = reservation(Reservation.Status.EN_ATTENTE, 1);
+        when(reservationRepository.findById(99)).thenReturn(Optional.of(reservation));
+        when(reservationRepository.findByBookIdAndStatusAndRankWaitingListGreaterThan(
+                5, Reservation.Status.EN_ATTENTE, 1)).thenReturn(List.of());
 
-        LoanResponse loanResponse = LoanResponse.builder().id(10).build();
-        ReservationResponse expected = new ReservationResponse();
-        expected.setStatus("DISPONIBLE");
+        reservationService.validateReservation(99);
 
-        when(reservationRepository.findById(1)).thenReturn(Optional.of(reservation));
-        when(loanService.borrowBook(1, 1)).thenReturn(loanResponse);
-        when(reservationRepository.findByBookIdAndStatusAndRankWaitingListGreaterThan(1, EN_ATTENTE, 1))
-                .thenReturn(List.of(r2));
-        when(reservationMapper.toResponse(reservation)).thenReturn(expected);
-
-        ReservationResponse result = reservationService.validateReservation(1);
-
-        assertThat(reservation.getStatus()).isEqualTo(DISPONIBLE);
-        assertThat(r2.getRankWaitingList()).isEqualTo(1);
-        verify(loanService).borrowBook(1, 1);
+        verify(loanService).borrowBook(1, 5);
+        assertThat(reservation.getStatus()).isEqualTo(Reservation.Status.DISPONIBLE);
+        verify(reservationRepository).save(reservation);
     }
 
     @Test
-    void validateReservation_notEnAttente_throwsBadRequest() {
-        reservation.setStatus(DISPONIBLE);
+    void validateReservation_notifiesUserByEmail() {
+        Reservation reservation = reservation(Reservation.Status.EN_ATTENTE, 1);
+        when(reservationRepository.findById(99)).thenReturn(Optional.of(reservation));
+        when(reservationRepository.findByBookIdAndStatusAndRankWaitingListGreaterThan(
+                any(), any(), any())).thenReturn(List.of());
 
-        when(reservationRepository.findById(1)).thenReturn(Optional.of(reservation));
+        reservationService.validateReservation(99);
 
-        assertThatThrownBy(() -> reservationService.validateReservation(1))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode())
-                        .isEqualTo(HttpStatus.BAD_REQUEST));
+        verify(mailService).sendReservationAvailable(reservation);
     }
 
     @Test
-    void validateReservation_reservationNotFound_throws404() {
-        when(reservationRepository.findById(99)).thenReturn(Optional.empty());
+    void validateReservation_emailFailure_doesNotCancelValidation() {
+        // Comme pour l'emprunt, une panne du serveur de messagerie ne doit pas
+        // remettre en cause l'opération métier déjà enregistrée.
+        Reservation reservation = reservation(Reservation.Status.EN_ATTENTE, 1);
+        when(reservationRepository.findById(99)).thenReturn(Optional.of(reservation));
+        when(reservationRepository.findByBookIdAndStatusAndRankWaitingListGreaterThan(
+                any(), any(), any())).thenReturn(List.of());
+        doThrow(new RuntimeException("Serveur SMTP injoignable"))
+                .when(mailService).sendReservationAvailable(any());
 
-        assertThatThrownBy(() -> reservationService.validateReservation(99))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(ex -> assertThat(((ResponseStatusException) ex).getStatusCode())
-                        .isEqualTo(HttpStatus.NOT_FOUND));
+        reservationService.validateReservation(99);
+
+        assertThat(reservation.getStatus()).isEqualTo(Reservation.Status.DISPONIBLE);
     }
 
-    // ── helpers ────────────────────────────────────────────────────────────────
+    @Test
+    void validateReservation_statusIsNotPending_returnsBadRequest() {
+        Reservation reservation = reservation(Reservation.Status.DISPONIBLE, 1);
+        when(reservationRepository.findById(99)).thenReturn(Optional.of(reservation));
 
-    private ReservationRequest request(int bookId) {
-        ReservationRequest req = new ReservationRequest();
-        req.setBookId(bookId);
-        return req;
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> reservationService.validateReservation(99));
+
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).contains("EN_ATTENTE");
+        verify(loanService, never()).borrowBook(any(), any());
+    }
+
+    // ── Consultation ───────────────────────────────────────────────────────────
+
+    @Test
+    void getMyReservations_returnsReservationsOfTheGivenAccount() {
+        Reservation reservation = reservation(Reservation.Status.EN_ATTENTE, 1);
+        when(userRepository.findByEmail(EMAIL)).thenReturn(Optional.of(user));
+        when(reservationRepository.findByUserId(1)).thenReturn(List.of(reservation));
+        when(reservationMapper.toResponse(reservation))
+                .thenReturn(ReservationResponse.builder().id(99).build());
+
+        List<ReservationResponse> reservations = reservationService.getMyReservations(EMAIL);
+
+        assertThat(reservations).hasSize(1);
+        assertThat(reservations.get(0).getId()).isEqualTo(99);
+    }
+
+    @Test
+    void getMyReservations_unknownEmail_returnsNotFound() {
+        when(userRepository.findByEmail("inconnu@email.com")).thenReturn(Optional.empty());
+
+        ResponseStatusException exception = assertThrows(ResponseStatusException.class,
+                () -> reservationService.getMyReservations("inconnu@email.com"));
+
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(exception.getReason()).isEqualTo("Utilisateur introuvable");
+    }
+
+    @Test
+    void getAllReservations_returnsEveryReservation() {
+        Reservation reservation = reservation(Reservation.Status.EN_ATTENTE, 1);
+        when(reservationRepository.findAll()).thenReturn(List.of(reservation));
+        when(reservationMapper.toResponse(reservation))
+                .thenReturn(ReservationResponse.builder().id(99).build());
+
+        assertThat(reservationService.getAllReservations()).hasSize(1);
     }
 }

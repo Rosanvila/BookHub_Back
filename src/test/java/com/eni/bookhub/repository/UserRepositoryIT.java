@@ -7,82 +7,91 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import java.time.LocalDateTime;
-import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * Tests d'intégration du dépôt des adhérents.
+ * <p>
+ * Ces requêtes servent à garantir l'unicité de l'adresse e-mail et du numéro de
+ * téléphone lors de l'inscription et de la modification du profil.
+ */
 class UserRepositoryIT extends AbstractIntegrationTest {
 
     @Autowired
     private UserRepository userRepository;
 
-    private User user;
+    private User jean;
 
     @BeforeEach
     void setUp() {
-        user = userRepository.save(User.builder()
-                .nom("Dupont").prenom("Jean")
-                .email("jean@test.com")
-                .telephone("0600000000")
-                .motDePasse("$2a$04$hash")
+        jean = saveUser("jean.dupont@email.com", "0612345678");
+    }
+
+    private User saveUser(String email, String telephone) {
+        return userRepository.save(User.builder()
+                .nom("Dupont")
+                .prenom("Jean")
+                .email(email)
+                .telephone(telephone)
+                .motDePasse("$2a$12$empreinte-de-test")
                 .role(User.Role.UTILISATEUR)
                 .dateCreation(LocalDateTime.now())
                 .build());
     }
 
-    @Test
-    void findByEmail_existingEmail_returnsUser() {
-        Optional<User> result = userRepository.findByEmail("jean@test.com");
+    // ── Recherche par adresse e-mail ───────────────────────────────────────────
 
-        assertThat(result).isPresent();
-        assertThat(result.get().getNom()).isEqualTo("Dupont");
+    @Test
+    void findByEmail_registeredEmail_returnsUser() {
+        // C'est cette requête qui identifie l'adhérent à la connexion
+        assertThat(userRepository.findByEmail("jean.dupont@email.com"))
+                .isPresent()
+                .get()
+                .extracting(User::getNom)
+                .isEqualTo("Dupont");
     }
 
     @Test
     void findByEmail_unknownEmail_returnsEmpty() {
-        Optional<User> result = userRepository.findByEmail("inconnu@test.com");
-
-        assertThat(result).isEmpty();
+        assertThat(userRepository.findByEmail("inconnu@email.com")).isEmpty();
     }
 
+    // ── Unicité à l'inscription ────────────────────────────────────────────────
+
     @Test
-    void existsByEmail_existingEmail_returnsTrue() {
-        assertThat(userRepository.existsByEmail("jean@test.com")).isTrue();
+    void existsByEmail_registeredEmail_returnsTrue() {
+        assertThat(userRepository.existsByEmail("jean.dupont@email.com")).isTrue();
     }
 
     @Test
     void existsByEmail_unknownEmail_returnsFalse() {
-        assertThat(userRepository.existsByEmail("inconnu@test.com")).isFalse();
+        assertThat(userRepository.existsByEmail("inconnu@email.com")).isFalse();
     }
 
     @Test
-    void existsByTelephone_existingPhone_returnsTrue() {
-        assertThat(userRepository.existsByTelephone("0600000000")).isTrue();
+    void existsByTelephone_registeredPhone_returnsTrue() {
+        assertThat(userRepository.existsByTelephone("0612345678")).isTrue();
     }
 
     @Test
     void existsByTelephone_unknownPhone_returnsFalse() {
-        assertThat(userRepository.existsByTelephone("0699999999")).isFalse();
+        assertThat(userRepository.existsByTelephone("0799999999")).isFalse();
+    }
+
+    // ── Unicité à la modification du profil ────────────────────────────────────
+
+    @Test
+    void existsByTelephoneAndIdNot_ownPhoneNumber_returnsFalse() {
+        // Un adhérent qui enregistre son profil sans changer de numéro
+        // ne doit pas entrer en conflit avec lui-même.
+        assertThat(userRepository.existsByTelephoneAndIdNot("0612345678", jean.getId())).isFalse();
     }
 
     @Test
-    void existsByTelephoneAndIdNot_sameUserSamePhone_returnsFalse() {
-        // Même téléphone, même ID → pas de conflit
-        assertThat(userRepository.existsByTelephoneAndIdNot("0600000000", user.getId())).isFalse();
-    }
+    void existsByTelephoneAndIdNot_phoneNumberOfAnotherMember_returnsTrue() {
+        saveUser("marie.curie@email.com", "0798765432");
 
-    @Test
-    void existsByTelephoneAndIdNot_anotherUserSamePhone_returnsTrue() {
-        // Un autre utilisateur a ce téléphone → conflit
-        userRepository.save(User.builder()
-                .nom("Martin").prenom("Pierre")
-                .email("pierre@test.com")
-                .telephone("0611111111")
-                .motDePasse("$2a$04$hash")
-                .role(User.Role.UTILISATEUR)
-                .dateCreation(LocalDateTime.now())
-                .build());
-
-        assertThat(userRepository.existsByTelephoneAndIdNot("0611111111", user.getId())).isTrue();
+        assertThat(userRepository.existsByTelephoneAndIdNot("0798765432", jean.getId())).isTrue();
     }
 }
